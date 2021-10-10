@@ -9,6 +9,12 @@ import sys
 ## böse and?
 ## Glossar
 
+from collections import namedtuple
+from enum import Enum
+
+StepType = Enum('StepType', 'GIVEN WHEN THEN')
+StepReference = namedtuple('StepReference', 'path feature scenario text line type')
+
 
 def get_instantiations(scenario):
     if 'examples' not in scenario:
@@ -81,44 +87,68 @@ def has_correct_tense(analysis, step_type, logging=None):
     possible_tenses = set([tense for token in analysis if token.morph.get('Tense') for tense in token.morph.get('Tense')])
     if not possible_tenses:
         return True # TODO: Logging
-    expected_tenses = dict(Given=['Past', 'Pres'], When=['Pres'], Then=['Pres'])[step_type]
+    expected_tenses = {
+        StepType.GIVEN.value:['Past', 'Pres'],
+        StepType.WHEN.value:['Pres'],
+        StepType.THEN.value:['Pres']}[step_type.value]
     # TODO: support present progressive
 
     if not any(tense in possible_tenses for tense in expected_tenses):
         if logging:
-            logging(f'has wrong tense. expected {" ".join(expected_tenses)} tense ({step_type.lower()}-step), but got {" ".join(possible_tenses)}')
+            logging(f'has wrong tense. expected {" ".join(expected_tenses)} tense ({step_type.name}-step), but got {" ".join(possible_tenses)}')
         return False
     return True
+
+
+def by_steps(pattern):
+    from glob import glob
+
+    for path in glob(pattern):
+        with open(path, 'r') as file:
+            feature = parser.parse(file.read())
+
+        for child in feature['feature']['children']:
+            key = 'scenario' if 'scenario' in child else 'background'
+            for instantiation in get_instantiations(child[key]):
+                step_type = StepType.GIVEN
+                for step in child[key]['steps']:
+                    step_type = map_type(step['keyword']) or step_type
+
+                    yield StepReference(
+                        path=path,
+                        feature=feature.get('feature', {}).get('name'),
+                        scenario=child[key].get('name'),
+                        text=remove_comments(replace_uuid(replace_variables(step['text'], instantiation))),
+                        type=step_type,
+                        line=step["location"]["line"],
+                    )
+                        
+
+def map_type(keyword):
+    value = keyword.strip().lower()
+    if value in ('and', 'but'):
+        return None
+    return dict(
+        given=StepType.GIVEN,
+        when=StepType.WHEN,
+        then=StepType.THEN,
+    )[value]
 
 
 if __name__ == '__main__':
     parser = Parser()
     nlp = spacy.load("en_core_web_trf")
     broken = False
-    for path in glob('corpus/*.feature'):
-        with open(path, 'r') as file:
-            feature = parser.parse(file.read())
-            for child in feature['feature']['children']:
-                key = 'scenario' if 'scenario' in child else 'background'
-                for instantiation in get_instantiations(child[key]):
-                    step_type = 'Given'
-                    for step in child[key]['steps']:
-                        if step['keyword'].strip().lower() == 'when':
-                            step_type = 'When'
-                        if step['keyword'].strip().lower() == 'then':
-                            step_type = 'Then'
-                        
-                        text = remove_comments(replace_uuid(replace_variables(step['text'], instantiation)))
+    for step in by_steps('corpus/*.feature'):
+        # print(f'{step.type.name} {step.text}')
+        def logging(issue):
+            print(f'{step.path} ({step.line}): Step "{step.text}" - {issue}', file=sys.stderr)
 
-                        def logging(issue):
-                            print(f'{path} ({child[key]["location"]["line"]}): Step "{text}" - {issue}', file=sys.stderr)
-
-                        analysis = nlp(text)
-                        if not has_verb(analysis, has_table='dataTable' in step, logging=logging):
-                            broken = True
-                        if not has_correct_tense(analysis, step_type=step_type, logging=logging):
-                            broken = True
-
+        analysis = nlp(step.text)
+        if not has_verb(analysis, has_table='dataTable' in step, logging=logging):
+            broken = True
+        if not has_correct_tense(analysis, step_type=step.type, logging=logging):
+            broken = True
     if broken:
         print('issues found.', file=sys.stderr)
         sys.exit(1)
