@@ -1,0 +1,2 @@
+gherkin-official==20.0.1
+spacy==3.1.1
